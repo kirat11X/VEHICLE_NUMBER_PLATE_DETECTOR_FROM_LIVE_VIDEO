@@ -1199,3 +1199,4 @@ vehicle, along with confidence values, OCR votes, corrected variants, selected
 crops, and runtime metadata.
 
 # VEHICLE_NUMBER_PLATE_DETECTOR_FROM_LIVE_VIDEO
+# VEHICLE_NUMBER_PLATE_DETECTOR_FROM_LIVE_VIDEO
