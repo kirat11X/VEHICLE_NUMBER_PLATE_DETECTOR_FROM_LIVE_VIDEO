@@ -1,0 +1,1201 @@
+# License Plate Recognition and Processing Pipeline
+
+This project is an Automatic Number Plate Recognition (ANPR) pipeline for
+detecting vehicles, detecting number plates inside those vehicles, tracking
+vehicles across frames, enhancing plate crops, and finally reading the plate
+text with OCR.
+
+The project is organized as a staged computer vision workflow:
+
+1. Convert a dashcam/video file into image frames.
+2. Improve frame quality using adaptive preprocessing.
+3. Run YOLO-based vehicle and plate detection.
+4. Track vehicles across frames.
+5. Select and enhance the best plate crops.
+6. Run OCR and apply Indian number plate grammar correction.
+
+The main entry point is `pipeline.py`, but every stage can also be run as an
+independent Python script.
+
+## Project Goal
+
+The goal of the project is to take a traffic or dashcam video as input and
+produce structured recognition results such as:
+
+- Vehicle detections with bounding boxes.
+- Number plate detections with bounding boxes.
+- Vehicle track IDs across multiple frames.
+- Enhanced number plate crop images.
+- OCR text candidates for Indian license plate formats.
+- JSON reports that can be used for analysis, visualization, or integration
+  with another system.
+
+## Important Path Configuration
+
+Several scripts currently use hard-coded absolute paths:
+
+```python
+Path("/home/kirat/my_proj_dream")
+```
+
+However, this workspace is located at:
+
+```text
+/home/kirat/Documents/my_proj_dream
+```
+
+Before running the full project, either move/copy the project to
+`/home/kirat/my_proj_dream` or update the hard-coded paths in these files:
+
+- `pipeline.py`
+- `video_image.py`
+- `yolo/model.py`
+- `camera_tracking.py`
+- `final_resolution`
+- `ocr.py`
+
+The most important values to check are:
+
+- `PROJECT_ROOT`
+- `INPUT_VIDEO`
+- `VEHICLE_MODEL_PATH`
+- `PLATE_MODEL_PATH`
+- output directory paths
+
+If these paths are not corrected, the scripts may fail even when the code is
+otherwise correct.
+
+## Input, Process, and Output Summary
+
+| Stage | Input | Process | Output |
+| --- | --- | --- | --- |
+| Frame extraction | Source video file | Uses FFmpeg to extract frames at a fixed FPS | `frames/`, `frame_metadata.json`, `frame_metadata.txt` |
+| Preprocessing | `frames/*.jpg` | Scores brightness, contrast, sharpness, noise, and applies selected filters | `preprocessing_outputs/full_frame/...` |
+| Combine preprocessing | Per-frame preprocessing folders | Groups filter outputs into combined folders | `preprocessing_outputs/combined/full_frame/...` |
+| Detection | Best preprocessed frames or raw frames | Runs vehicle YOLO, then plate YOLO inside vehicle crops | `yolo/outputs/detections.json`, crops, annotated images |
+| Tracking | Detection records and frames | Assigns persistent track IDs using ByteTrack, DeepSORT, or simple IoU fallback | `tracking_outputs/tracked_frames.json`, `track_summary.json` |
+| Plate enhancement | Tracking outputs and plate boxes | Crops best plate region, validates quality, resizes, applies CLAHE, sharpens | `final_resolution_outputs/...` |
+| OCR | Enhanced/tight plate crops | Uses EasyOCR or PaddleOCR, normalizes text, applies Indian plate grammar | `ocr_outputs/ocr_results.json` |
+
+## High-Level Workflow
+
+```text
+Input video
+   |
+   v
+video_image.py
+   |
+   v
+frames/
+   |
+   v
+system_preprocessing.py
+   |
+   v
+preprocessing_outputs/full_frame/
+   |
+   v
+combine_folders.py
+   |
+   v
+preprocessing_outputs/combined/full_frame/best/
+   |
+   v
+yolo/model.py
+   |
+   v
+yolo/outputs/
+   |
+   v
+camera_tracking.py
+   |
+   v
+tracking_outputs/
+   |
+   v
+final_resolution
+   |
+   v
+final_resolution_outputs/
+   |
+   v
+ocr.py
+   |
+   v
+ocr_outputs/ocr_results.json
+```
+
+## Project File Structure
+
+The repository contains source scripts, model files, datasets, and generated
+outputs. A simplified structure is shown below.
+
+```text
+my_proj_dream/
+|
+|-- README.md
+|-- pipeline.py
+|-- video_image.py
+|-- system_preprocessing.py
+|-- filter.py
+|-- combine_folders.py
+|-- yolo/
+|   |-- model.py
+|   |-- prepare_datasets.py
+|   |-- outputs/
+|   |   |-- detections.json
+|   |   |-- frame_000001/
+|   |   |   |-- annotated/
+|   |   |   |-- vehicle_crops/
+|   |   |   |-- plate_crops/
+|   |-- archive(3)/
+|   |-- archive(5)/
+|   |-- vid-1/
+|   |-- vid-2/
+|   |-- vid-3/
+|-- camera_tracking.py
+|-- final_resolution
+|-- ocr.py
+|-- using_code.py
+|-- look.jsx
+|-- yolo11n.pt
+|-- yolo26n.pt
+|
+|-- frames/                         created after frame extraction
+|-- preprocessing_outputs/          created after preprocessing
+|-- tracking_outputs/               created after tracking
+|-- final_resolution_outputs/       created after plate enhancement
+|-- ocr_outputs/                    created after OCR
+```
+
+Some folders, such as `frames/`, `preprocessing_outputs/`,
+`tracking_outputs/`, `final_resolution_outputs/`, and `ocr_outputs/`, are
+generated by the pipeline and may not exist until their stage has been run.
+
+## Detailed File Explanation
+
+### `pipeline.py`
+
+Main orchestration script for the complete ANPR workflow.
+
+Responsibilities:
+
+- Defines the pipeline steps in order.
+- Runs each stage script using `runpy.run_path`.
+- Allows running all stages or selected stages.
+- Provides CLI options for listing, starting, stopping, or running only chosen
+  steps.
+
+Pipeline step keys:
+
+```text
+frame_extraction
+preprocessing
+combine_preprocessing
+detection
+tracking
+plate_enhancement
+ocr
+```
+
+Useful commands:
+
+```bash
+python pipeline.py --list
+python pipeline.py
+python pipeline.py --only frame_extraction preprocessing
+python pipeline.py --start-at detection
+python pipeline.py --stop-after tracking
+```
+
+### `video_image.py`
+
+Extracts frames from the input video.
+
+Main inputs:
+
+- `INPUT_VIDEO`: path to the source video.
+- `TARGET_FPS`: number of frames to extract per second.
+- `OUTPUT_FORMAT`: image format such as `jpg`, `png`, or `webp`.
+
+Main process:
+
+- Reads video metadata using FFmpeg.
+- Extracts frames using `ffmpeg-python`.
+- Preserves source resolution when configured.
+- Creates metadata for every extracted frame.
+
+Main outputs:
+
+```text
+frames/
+|-- frame_000001.jpg
+|-- frame_000002.jpg
+|-- ...
+|-- frame_metadata.json
+|-- frame_metadata.txt
+```
+
+`frame_metadata.json` stores frame IDs, file names, timestamps, source FPS,
+target FPS, source resolution, and video source information.
+
+### `system_preprocessing.py`
+
+Applies adaptive image preprocessing to every frame.
+
+Main inputs:
+
+- `frames/*.jpg`
+- Optional ROI configuration through `ROI`
+- Mode configuration through `MODE`
+
+Main process:
+
+- Reads every frame from `frames/`.
+- Computes image quality metrics:
+  - brightness
+  - contrast
+  - sharpness
+  - noise
+  - edge strength
+- Selects candidate filters based on image quality.
+- Scores all candidates.
+- Saves the best output and optional candidate images.
+
+Filters that may be used:
+
+- original
+- CLAHE
+- gamma correction
+- bilateral filtering
+- non-local means denoising
+- unsharp mask
+- Wiener deconvolution, if SciPy is installed and the mode supports it
+
+Main outputs:
+
+```text
+preprocessing_outputs/
+|-- full_frame/
+|   |-- frame_000001/
+|   |   |-- original/frame_000001.jpg
+|   |   |-- clahe/frame_000001.jpg
+|   |   |-- gamma/frame_000001.jpg
+|   |   |-- unsharp/frame_000001.jpg
+|   |   |-- best/frame_000001.jpg
+|   |   |-- report.json
+|   |-- frame_000002/
+|   |-- ...
+```
+
+Each `report.json` contains the quality metrics, candidate scores, selected
+filter, and path to the best image.
+
+### `filter.py`
+
+Shared image filtering utility module.
+
+Responsibilities:
+
+- Converts images to grayscale.
+- Applies Gaussian blur.
+- Applies median filtering.
+- Applies bilateral filtering.
+- Applies non-local means denoising.
+- Applies CLAHE contrast enhancement.
+- Applies gamma correction.
+- Applies unsharp masking.
+- Applies optional Wiener deconvolution.
+- Saves processed images.
+
+This file is imported by preprocessing, final enhancement, and OCR stages.
+
+### `combine_folders.py`
+
+Combines per-frame preprocessing outputs into filter-wise folders.
+
+Main input:
+
+```text
+preprocessing_outputs/full_frame/frame_xxxxxx/
+```
+
+Main process:
+
+- Iterates through every preprocessed frame folder.
+- Copies selected filter outputs into common grouped folders.
+
+Main output:
+
+```text
+preprocessing_outputs/
+|-- combined/
+|   |-- full_frame/
+|   |   |-- best/
+|   |   |-- clahe/
+|   |   |-- gamma/
+|   |   |-- original/
+|   |   |-- unsharp/
+```
+
+The detection stage prefers:
+
+```text
+preprocessing_outputs/combined/full_frame/best/
+```
+
+If this folder does not exist, detection falls back to raw `frames/`.
+
+### `yolo/model.py`
+
+Runs the two-stage object detection pipeline.
+
+Main inputs:
+
+- Best preprocessed frames from
+  `preprocessing_outputs/combined/full_frame/best/`, if available.
+- Raw frames from `frames/`, if best preprocessed frames are not available.
+- Vehicle YOLO model from `VEHICLE_MODEL_PATH`.
+- Plate YOLO model from `PLATE_MODEL_PATH`.
+- Frame metadata from `frames/frame_metadata.json`.
+
+Main process:
+
+1. Detect vehicles in each frame.
+2. Keep vehicle classes such as car, truck, bus, motorcycle, and bike.
+3. Limit results to the most relevant vehicles per frame.
+4. Crop each vehicle.
+5. Run plate detection inside each vehicle crop.
+6. Save vehicle crops, plate crops, annotated frames, and JSON records.
+
+Main outputs:
+
+```text
+yolo/outputs/
+|-- detections.json
+|-- frame_000001/
+|   |-- annotated/frame_000001.jpg
+|   |-- vehicle_crops/
+|   |   |-- frame_000001_vehicle_01.jpg
+|   |-- plate_crops/
+|   |   |-- frame_000001_vehicle_01_plate_01.jpg
+|-- frame_000002/
+|-- ...
+```
+
+`detections.json` contains structured records with:
+
+- frame ID
+- timestamp
+- camera ID
+- vehicle ID
+- detection stage
+- class name
+- confidence
+- bounding box
+- source image
+- crop path
+- parent vehicle ID
+
+### `yolo/prepare_datasets.py`
+
+Prepares datasets for YOLO training.
+
+Main inputs:
+
+- COCO-style vehicle data from `yolo/archive(5)/`
+- Number plate datasets from:
+  - `yolo/archive(3)/`
+  - `yolo/vid-1/`
+  - `yolo/vid-2/`
+  - `yolo/vid-3/`
+
+Main process:
+
+- Converts COCO vehicle annotations into YOLO format.
+- Merges plate datasets into a single YOLO dataset.
+- Creates train/validation splits.
+- Writes `dataset.yaml` files.
+- Uses symlinks by default, or copies files when `--copy` is used.
+
+Useful commands:
+
+```bash
+python yolo/prepare_datasets.py
+python yolo/prepare_datasets.py --copy
+python yolo/prepare_datasets.py --vehicle-only
+python yolo/prepare_datasets.py --plate-only
+```
+
+Main outputs:
+
+```text
+yolo/prepared/
+|-- vehicle/
+|   |-- images/train/
+|   |-- images/val/
+|   |-- labels/train/
+|   |-- labels/val/
+|   |-- dataset.yaml
+|-- plate/
+|   |-- images/train/
+|   |-- images/val/
+|   |-- labels/train/
+|   |-- labels/val/
+|   |-- dataset.yaml
+```
+
+### `camera_tracking.py`
+
+Tracks detected vehicles across frames and links plate crops to track IDs.
+
+Main inputs:
+
+- Detection report from `yolo/outputs/detections.json`.
+- Frames from the same image source used by detection.
+- Vehicle and plate YOLO models.
+
+Supported tracking approaches:
+
+- ByteTrack, default.
+- DeepSORT, if configured.
+- Simple IoU fallback for cases where tracker dependencies are unavailable.
+
+Main process:
+
+- Reads detections or runs tracker-based inference.
+- Assigns a persistent `track_id` to vehicles.
+- Associates the best plate crop with each vehicle track.
+- Saves annotated tracking frames.
+- Writes frame-level and track-level JSON summaries.
+
+Main outputs:
+
+```text
+tracking_outputs/
+|-- tracked_frames.json
+|-- track_summary.json
+|-- annotated_frames/
+|   |-- frame_000001.jpg
+|   |-- frame_000002.jpg
+|-- frame_000001/
+|   |-- plate_crops/
+|   |   |-- track_0001.jpg
+```
+
+`track_summary.json` contains track-level information such as:
+
+- track ID
+- class name
+- last bounding box
+- timestamps
+- confidence history
+- vehicle bounding boxes
+- plate bounding boxes
+- plate crop paths
+- best plate crop
+
+### `final_resolution`
+
+Enhances the best plate crop for every tracked vehicle.
+
+This file is a Python script without a `.py` extension.
+
+Main inputs:
+
+- `tracking_outputs/track_summary.json`
+- `tracking_outputs/tracked_frames.json`
+- Source frames referenced by the tracking output
+
+Main process:
+
+- Finds the best frame for each vehicle track.
+- Crops the plate region with padding.
+- Validates crop quality:
+  - minimum width
+  - minimum height
+  - aspect ratio
+  - sharpness
+- Upscales the crop.
+- Applies CLAHE.
+- Applies mild sharpening.
+- Saves every enhancement stage.
+
+Main outputs:
+
+```text
+final_resolution_outputs/
+|-- plate_resolution_summary.json
+|-- track_0001/
+|   |-- original/
+|   |-- resized_2x/
+|   |-- clahe/
+|   |-- final/
+|-- track_0002/
+|-- ...
+```
+
+`plate_resolution_summary.json` contains:
+
+- processing status
+- selected frame ID
+- timestamp
+- source image
+- padded plate bounding box
+- input quality metrics
+- final quality metrics
+- saved output paths
+
+### `ocr.py`
+
+Runs OCR on selected plate crops and applies Indian plate text correction.
+
+Main inputs:
+
+- `final_resolution_outputs/plate_resolution_summary.json`
+- `tracking_outputs/tracked_frames.json`
+- Tight plate crops generated from tracked frame records
+
+Main process:
+
+- Chooses OCR engine:
+  - EasyOCR, if installed.
+  - PaddleOCR, if EasyOCR is unavailable and PaddleOCR is installed.
+- Selects the top crops for each track.
+- Enhances crops for OCR.
+- Reads raw text from OCR.
+- Normalizes characters to uppercase alphanumeric text.
+- Corrects common OCR confusions:
+  - `O` and `0`
+  - `I`, `L`, and `1`
+  - `S` and `5`
+  - `B` and `8`
+  - `G` and `6`
+- Checks Indian license plate grammar using this pattern:
+
+```text
+^[A-Z]{2}[0-9]{2}[A-Z]{1,3}[0-9]{4}$
+```
+
+Main outputs:
+
+```text
+ocr_outputs/
+|-- ocr_results.json
+|-- debug_crops/
+|   |-- track_0001/
+|   |   |-- tight_original/
+|   |   |-- deskewed_final/
+```
+
+`ocr_results.json` contains:
+
+- OCR engine used
+- GPU/CUDA runtime information
+- Indian plate regex
+- OCR confidence threshold
+- result per vehicle track
+- plate text candidate
+- OCR votes
+- corrected variants
+- selected crop metadata
+
+### `using_code.py`
+
+Small experimental script for extracting frames from a sample video.
+
+This file is useful as a quick sandbox or reference, but it is not part of the
+main pipeline.
+
+### `look.jsx`
+
+Adobe After Effects JSX script.
+
+This file appears to be separate from the Python ANPR pipeline. It may be used
+for visual overlays, presentation, or post-production work, but it is not
+called by `pipeline.py`.
+
+### `yolo11n.pt` and `yolo26n.pt`
+
+YOLO weight files stored at the project root.
+
+Important note:
+
+The current detection script does not directly use these root-level weights by
+default. `yolo/model.py` expects trained weights at:
+
+```text
+/home/kirat/my_proj_dream/yolo/runs/vehicle_train/weights/best.pt
+/home/kirat/my_proj_dream/yolo/runs/plate_train/weights/best.pt
+```
+
+Update `VEHICLE_MODEL_PATH` and `PLATE_MODEL_PATH` if you want to use different
+weights.
+
+## Input Requirements
+
+### 1. Video Input
+
+The project expects a traffic or dashcam video file. Configure the path in
+`video_image.py`:
+
+```python
+INPUT_VIDEO = "/path/to/input_video.mp4"
+```
+
+Recommended input:
+
+- Clear road or traffic video.
+- Stable camera if possible.
+- Sufficient resolution for license plates.
+- Daylight or well-lit footage improves results.
+
+### 2. Model Inputs
+
+The detection stage requires two trained YOLO models:
+
+- Vehicle detector.
+- Number plate detector.
+
+Configure them in `yolo/model.py`:
+
+```python
+VEHICLE_MODEL_PATH = "/path/to/vehicle/best.pt"
+PLATE_MODEL_PATH = "/path/to/plate/best.pt"
+```
+
+### 3. Dataset Inputs
+
+For training or preparing YOLO datasets, the project uses:
+
+```text
+yolo/archive(5)/      COCO-style vehicle dataset
+yolo/archive(3)/      plate dataset
+yolo/vid-1/           plate dataset
+yolo/vid-2/           plate dataset
+yolo/vid-3/           plate dataset
+```
+
+Each YOLO plate dataset should contain:
+
+```text
+images/
+labels/
+classes.txt
+```
+
+## Setup Instructions
+
+### 1. Go to the Project Directory
+
+```bash
+cd /home/kirat/Documents/my_proj_dream
+```
+
+### 2. Create and Activate a Virtual Environment
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+```
+
+### 3. Install Python Dependencies
+
+There is no `requirements.txt` file in the current project, so install the main
+dependencies manually:
+
+```bash
+pip install opencv-python numpy ffmpeg-python ultralytics torch scipy rapidfuzz easyocr paddleocr deep-sort-realtime lap matplotlib
+```
+
+Depending on your system, `torch` may require a CUDA-specific installation
+command from the official PyTorch website.
+
+### 4. Install FFmpeg System Binary
+
+`video_image.py` uses `ffmpeg-python`, but the actual FFmpeg executable must
+also be installed on the system.
+
+Check installation:
+
+```bash
+ffmpeg -version
+```
+
+If FFmpeg is missing on Ubuntu/Debian:
+
+```bash
+sudo apt update
+sudo apt install ffmpeg
+```
+
+### 5. Correct Project Paths
+
+Update hard-coded paths before running:
+
+```text
+/home/kirat/my_proj_dream
+```
+
+to:
+
+```text
+/home/kirat/Documents/my_proj_dream
+```
+
+or place the project at `/home/kirat/my_proj_dream`.
+
+## How to Run the Project
+
+### Option 1: Run the Complete Pipeline
+
+After paths, video input, model paths, and dependencies are ready:
+
+```bash
+python pipeline.py
+```
+
+### Option 2: List Pipeline Steps
+
+```bash
+python pipeline.py --list
+```
+
+### Option 3: Run One Stage
+
+```bash
+python pipeline.py --only frame_extraction
+python pipeline.py --only preprocessing
+python pipeline.py --only detection
+python pipeline.py --only tracking
+python pipeline.py --only plate_enhancement
+python pipeline.py --only ocr
+```
+
+### Option 4: Run a Range of Stages
+
+Start from detection:
+
+```bash
+python pipeline.py --start-at detection
+```
+
+Stop after tracking:
+
+```bash
+python pipeline.py --stop-after tracking
+```
+
+### Option 5: Run Scripts Manually
+
+Run each stage yourself:
+
+```bash
+python video_image.py
+python system_preprocessing.py
+python combine_folders.py
+python yolo/model.py
+python camera_tracking.py
+python final_resolution
+python ocr.py
+```
+
+Because `final_resolution` has no `.py` extension, run it exactly as shown:
+
+```bash
+python final_resolution
+```
+
+## Detailed Execution Steps
+
+### Step 1: Extract Frames
+
+Configure `INPUT_VIDEO` and run:
+
+```bash
+python video_image.py
+```
+
+Expected output:
+
+```text
+frames/frame_000001.jpg
+frames/frame_000002.jpg
+frames/frame_metadata.json
+frames/frame_metadata.txt
+```
+
+### Step 2: Preprocess Frames
+
+Run:
+
+```bash
+python system_preprocessing.py
+```
+
+Expected output:
+
+```text
+preprocessing_outputs/full_frame/frame_000001/best/frame_000001.jpg
+preprocessing_outputs/full_frame/frame_000001/report.json
+```
+
+### Step 3: Combine Preprocessed Outputs
+
+Run:
+
+```bash
+python combine_folders.py
+```
+
+Expected output:
+
+```text
+preprocessing_outputs/combined/full_frame/best/
+```
+
+### Step 4: Detect Vehicles and Plates
+
+Configure model paths in `yolo/model.py`, then run:
+
+```bash
+python yolo/model.py
+```
+
+Expected output:
+
+```text
+yolo/outputs/detections.json
+yolo/outputs/frame_000001/annotated/frame_000001.jpg
+yolo/outputs/frame_000001/vehicle_crops/
+yolo/outputs/frame_000001/plate_crops/
+```
+
+### Step 5: Track Vehicles
+
+Run:
+
+```bash
+python camera_tracking.py
+```
+
+Expected output:
+
+```text
+tracking_outputs/tracked_frames.json
+tracking_outputs/track_summary.json
+tracking_outputs/annotated_frames/
+```
+
+### Step 6: Enhance Plate Crops
+
+Run:
+
+```bash
+python final_resolution
+```
+
+Expected output:
+
+```text
+final_resolution_outputs/plate_resolution_summary.json
+final_resolution_outputs/track_0001/final/
+```
+
+### Step 7: Run OCR
+
+Run:
+
+```bash
+python ocr.py
+```
+
+Expected output:
+
+```text
+ocr_outputs/ocr_results.json
+ocr_outputs/debug_crops/
+```
+
+## Output File Details
+
+### `frames/frame_metadata.json`
+
+Stores frame extraction metadata:
+
+- input video path
+- output frame format
+- target FPS
+- source FPS
+- video dimensions
+- frame count
+- per-frame timestamp information
+
+### `preprocessing_outputs/.../report.json`
+
+Stores preprocessing decisions:
+
+- selected filter
+- candidate filter count
+- base image metrics
+- candidate metrics
+- candidate scores
+- best output path
+
+### `yolo/outputs/detections.json`
+
+Stores detection records:
+
+- `frame_id`
+- `timestamp`
+- `camera_id`
+- `vehicle_id`
+- `detection_stage`
+- `class_name`
+- `confidence`
+- `bbox_xyxy`
+- `source_image`
+- `crop_path`
+- `parent_vehicle_id`
+
+### `tracking_outputs/tracked_frames.json`
+
+Stores frame-level tracking data:
+
+- frame ID
+- timestamp
+- source image
+- track ID
+- vehicle class
+- confidence
+- vehicle bounding box
+- plate bounding box
+- tracker backend
+
+### `tracking_outputs/track_summary.json`
+
+Stores track-level vehicle history:
+
+- track ID
+- class name
+- latest bounding box
+- frame history
+- confidence history
+- plate crop paths
+- best plate crop
+
+### `final_resolution_outputs/plate_resolution_summary.json`
+
+Stores plate crop enhancement results:
+
+- status per track
+- selected frame
+- padded crop bounding box
+- input quality score
+- final quality score
+- saved enhancement image paths
+
+### `ocr_outputs/ocr_results.json`
+
+Stores OCR results:
+
+- OCR engine
+- GPU runtime status
+- Indian plate regex
+- per-track OCR result
+- plate text candidate
+- confidence
+- OCR votes
+- corrected variants
+- selected crop details
+
+## Model and Dataset Preparation
+
+To prepare datasets:
+
+```bash
+python yolo/prepare_datasets.py
+```
+
+To prepare only vehicle data:
+
+```bash
+python yolo/prepare_datasets.py --vehicle-only
+```
+
+To prepare only plate data:
+
+```bash
+python yolo/prepare_datasets.py --plate-only
+```
+
+To copy files instead of creating symlinks:
+
+```bash
+python yolo/prepare_datasets.py --copy
+```
+
+After dataset preparation, train YOLO models separately and place the trained
+weights where `yolo/model.py` expects them, or update the model path constants.
+
+Expected trained model paths by default:
+
+```text
+yolo/runs/vehicle_train/weights/best.pt
+yolo/runs/plate_train/weights/best.pt
+```
+
+## Configuration Values to Tune
+
+### Frame Extraction
+
+In `video_image.py`:
+
+- `TARGET_FPS`: increase for more frames, decrease for faster processing.
+- `OUTPUT_FORMAT`: choose `jpg`, `png`, or `webp`.
+- `JPEG_QUALITY`: lower value means better JPEG quality.
+- `EXTRACT_KEYFRAMES_ONLY`: use keyframes only when needed.
+
+### Preprocessing
+
+In `system_preprocessing.py`:
+
+- `LOW_BRIGHTNESS_THRESHOLD`
+- `LOW_CONTRAST_THRESHOLD`
+- `LOW_SHARPNESS_THRESHOLD`
+- `HIGH_NOISE_THRESHOLD`
+- `SAVE_ALL_CANDIDATES`
+
+### Detection
+
+In `yolo/model.py`:
+
+- `VEHICLE_CONFIDENCE`
+- `PLATE_CONFIDENCE`
+- `VEHICLE_CLASSES`
+- `MAX_VEHICLES_PER_FRAME`
+- `SAVE_ANNOTATED_FRAMES`
+- `SAVE_VEHICLE_CROPS`
+- `SAVE_PLATE_CROPS`
+
+### Tracking
+
+In `camera_tracking.py`:
+
+- `TRACKER_BACKEND`
+- `DEEPSORT_MAX_AGE`
+- `DEEPSORT_N_INIT`
+- `SAVE_ANNOTATED_FRAMES`
+- `SAVE_TRACK_SUMMARY`
+
+### Plate Enhancement
+
+In `final_resolution`:
+
+- `PADDING_RATIO`
+- `UPSCALE_FACTOR`
+- `MIN_PLATE_WIDTH`
+- `MIN_PLATE_HEIGHT`
+- `MIN_ASPECT_RATIO`
+- `MAX_ASPECT_RATIO`
+- `MIN_SHARPNESS`
+
+### OCR
+
+In `ocr.py`:
+
+- `OCR_MIN_CONFIDENCE`
+- `TOP_CROPS_PER_TRACK`
+- `TARGET_OCR_WIDTH`
+- `MIN_OCR_PLATE_WIDTH`
+- `TIGHT_MARGIN_RATIO`
+
+## Common Problems and Fixes
+
+### `FileNotFoundError` for project files
+
+Check hard-coded paths. The code currently refers to `/home/kirat/my_proj_dream`
+in multiple places.
+
+### `ffmpeg.probe` or `ffmpeg` command fails
+
+Install the FFmpeg system package and ensure it is available in the terminal:
+
+```bash
+ffmpeg -version
+```
+
+### `ultralytics is not installed`
+
+Install the package:
+
+```bash
+pip install ultralytics
+```
+
+### YOLO model file not found
+
+Update these constants in `yolo/model.py`:
+
+```python
+VEHICLE_MODEL_PATH = "/path/to/vehicle/best.pt"
+PLATE_MODEL_PATH = "/path/to/plate/best.pt"
+```
+
+### OCR output says `no_ocr_engine`
+
+Install at least one OCR engine:
+
+```bash
+pip install easyocr
+```
+
+or:
+
+```bash
+pip install paddleocr
+```
+
+### ByteTrack dependency error for `lap`
+
+Install:
+
+```bash
+pip install lap
+```
+
+If unavailable, the tracking script can fall back to simple IoU tracking in
+some cases.
+
+## Recommended Project Completion Checklist
+
+Use this checklist to complete the project cleanly:
+
+1. Set the correct project root paths.
+2. Set the correct input video path.
+3. Prepare or download trained vehicle and plate YOLO weights.
+4. Update `VEHICLE_MODEL_PATH` and `PLATE_MODEL_PATH`.
+5. Extract frames from the input video.
+6. Run adaptive preprocessing.
+7. Combine best preprocessing outputs.
+8. Run vehicle and plate detection.
+9. Verify `yolo/outputs/detections.json`.
+10. Run tracking and verify `tracking_outputs/track_summary.json`.
+11. Run plate crop enhancement.
+12. Run OCR.
+13. Inspect `ocr_outputs/ocr_results.json`.
+14. Tune confidence thresholds and preprocessing settings if results are weak.
+
+## Final Output
+
+The final result of the complete pipeline is:
+
+```text
+ocr_outputs/ocr_results.json
+```
+
+This file contains the recognized plate text candidates for each tracked
+vehicle, along with confidence values, OCR votes, corrected variants, selected
+crops, and runtime metadata.
+
+# VEHICLE_NUMBER_PLATE_DETECTOR_FROM_LIVE_VIDEO
